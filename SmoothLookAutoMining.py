@@ -22,24 +22,24 @@ CONFIG = {
     'ignore_block_state': False,
     
     # Search distance in blocks (4.5 is typical survival reach, 5.0 for creative)
-    'search_distance': 4.5,
+    'search_distance': 5,
     
     # Rotation speed: duration in seconds for camera rotation
-    # Lower = faster, Higher = slower and smoother
-    'rotation_duration': 1.5,
+    # Lower = faster, Higher = slower
+    'rotation_duration': 0.05,
     
     # Smoothness: number of steps for interpolation
-    # Higher = smoother but more CPU intensive (30-120 recommended)
+    # Higher = smoother (30-120 recommended)
     'rotation_steps': 90,
     
-    # Cooldown in seconds before moving to next block
-    'block_cooldown': 0.8,
+    # Cooldown in seconds before scanning for next block
+    'block_cooldown': 0.1,
     
-    # If True, continuously scan for new blocks after completing a batch
-    # Will keep running until no new blocks are found
-    'continuous_scan': True,
+    # If True, automatically rescan after each block is broken
+    # This allows continuous mining as new blocks come into range
+    'auto_rescan': True,
     
-    # Key to press to trigger a new scan (uses GLFW key codes)
+    # Key to press to trigger a new scan session (uses GLFW key codes)
     # Common keys: 89 = Y, 82 = R, 71 = G, 84 = T
     # See: https://www.glfw.org/docs/3.3/group__keys.html
     'rescan_key': 89,  # Y key
@@ -52,11 +52,11 @@ CONFIG = {
     'break_blocks': True,
     
     # Pause in seconds after looking at block before breaking it
-    'break_delay': 0.3,
+    'break_delay': 0,
     
-    # Time in seconds to hold attack button (for breaking blocks)
-    # Increase this for blocks that take longer to break
-    'break_hold_time': 0.1,
+    # If True, intelligently target the visible face of blocks
+    # (useful for partially obscured blocks)
+    'use_smart_targeting': True,
 }
 # ============================================
 
@@ -113,20 +113,79 @@ def find_all_blocks(max_distance=5, block_type='minecraft:iron_block', ignore_st
     
     return blocks_found
 
+def find_visible_block_point(player_pos, block_pos):
+    """
+    Find the best visible point on a block to look at.
+    Checks which face of the block is most visible and returns a point on that face.
+    
+    Args:
+        player_pos: (x, y, z) tuple of player position
+        block_pos: (x, y, z) tuple of block position (integers)
+    
+    Returns:
+        (x, y, z) tuple of the best point to look at on the block
+    """
+    px, py, pz = player_pos
+    bx, by, bz = block_pos
+    
+    # Calculate player's eye position (1.62 blocks above feet)
+    eye_y = py + 1.62
+    
+    # Calculate direction from player eye to block center
+    dx = (bx + 0.5) - px
+    dy = (by + 0.5) - eye_y
+    dz = (bz + 0.5) - pz
+    
+    # Offset from center for each face (0.45 = near edge but not quite at it)
+    face_offset = 0.45
+    
+    # Calculate absolute differences to determine dominant direction
+    abs_dx = abs(dx)
+    abs_dy = abs(dy)
+    abs_dz = abs(dz)
+    
+    # Find the dominant axis (which face is most directly visible)
+    if abs_dx > abs_dy and abs_dx > abs_dz:
+        # X-axis dominant (west/east face)
+        target_x = bx + (0.5 - face_offset if dx < 0 else 0.5 + face_offset)
+        target_y = by + 0.5
+        target_z = bz + 0.5
+    elif abs_dy > abs_dz:
+        # Y-axis dominant (bottom/top face)
+        target_x = bx + 0.5
+        target_y = by + (0.5 - face_offset if dy < 0 else 0.5 + face_offset)
+        target_z = bz + 0.5
+    else:
+        # Z-axis dominant (north/south face)
+        target_x = bx + 0.5
+        target_y = by + 0.5
+        target_z = bz + (0.5 - face_offset if dz < 0 else 0.5 + face_offset)
+    
+    return (target_x, target_y, target_z)
+
 def calculate_look_angles(player_pos, target_pos):
-    """Calculate yaw and pitch to look at target position from player position."""
+    """
+    Calculate yaw and pitch to look at target position from player position.
+    
+    Args:
+        player_pos: (x, y, z) tuple of player position
+        target_pos: (x, y, z) tuple of target position
+    
+    Returns:
+        (yaw, pitch) tuple in degrees
+    """
     px, py, pz = player_pos
     tx, ty, tz = target_pos
     
-    # Calculate differences
+    # Calculate differences (adjust for player eye height at 1.62 blocks)
     dx = tx - px
-    dy = ty - (py + 1.62)  # Add player eye height
+    dy = ty - (py + 1.62)
     dz = tz - pz
     
     # Calculate distance in horizontal plane
     horizontal_distance = math.sqrt(dx**2 + dz**2)
     
-    # Calculate pitch (vertical angle)
+    # Calculate pitch (vertical angle, negative because of Minecraft's coordinate system)
     pitch = -math.degrees(math.atan2(dy, horizontal_distance))
     
     # Calculate yaw (horizontal angle)
@@ -175,7 +234,7 @@ def calculate_angular_distance(yaw1, pitch1, yaw2, pitch2):
     # Return angle in degrees
     return math.degrees(math.acos(dot_product))
 
-def sort_blocks_by_viewing_order(blocks, player_pos):
+def sort_blocks_by_viewing_order(blocks, player_pos, use_smart_targeting):
     """
     Sort blocks by natural viewing order (cluster-aware).
     Looks at nearest block first, then blocks close to current view direction.
@@ -199,10 +258,14 @@ def sort_blocks_by_viewing_order(blocks, player_pos):
     # For each subsequent block, pick the one closest to current view angle
     while remaining:
         current_pos = current_block['position']
-        current_yaw, current_pitch = calculate_look_angles(player_pos, 
-                                                           (current_pos[0] + 0.5, 
-                                                            current_pos[1] + 0.5, 
-                                                            current_pos[2] + 0.5))
+        
+        # Calculate target point (smart or center)
+        if use_smart_targeting:
+            target_point = find_visible_block_point(player_pos, current_pos)
+        else:
+            target_point = (current_pos[0] + 0.5, current_pos[1] + 0.5, current_pos[2] + 0.5)
+        
+        current_yaw, current_pitch = calculate_look_angles(player_pos, target_point)
         
         # Find block with minimum angular distance from current view
         best_block = None
@@ -210,10 +273,14 @@ def sort_blocks_by_viewing_order(blocks, player_pos):
         
         for block in remaining:
             block_pos = block['position']
-            target_yaw, target_pitch = calculate_look_angles(player_pos,
-                                                             (block_pos[0] + 0.5,
-                                                              block_pos[1] + 0.5,
-                                                              block_pos[2] + 0.5))
+            
+            # Calculate target point for this block
+            if use_smart_targeting:
+                block_target = find_visible_block_point(player_pos, block_pos)
+            else:
+                block_target = (block_pos[0] + 0.5, block_pos[1] + 0.5, block_pos[2] + 0.5)
+            
+            target_yaw, target_pitch = calculate_look_angles(player_pos, block_target)
             
             angular_dist = calculate_angular_distance(current_yaw, current_pitch,
                                                       target_yaw, target_pitch)
@@ -228,17 +295,15 @@ def sort_blocks_by_viewing_order(blocks, player_pos):
     
     return sorted_blocks
 
-def smooth_look_at(target_pos, duration=1.0, steps=60):
+def smooth_look_at(target_pos, block_pos, duration=1.0, steps=60):
     """
     Smoothly rotate camera to look at target position.
     
     Args:
-        target_pos: (x, y, z) tuple of target block position
+        target_pos: (x, y, z) tuple of precise target point to look at
+        block_pos: (x, y, z) tuple of block position (for breaking)
         duration: Time in seconds for the smooth rotation
         steps: Number of interpolation steps
-    
-    Returns:
-        Final (yaw, pitch) orientation after rotation
     """
     player_pos = minescript.player_position()
     current_yaw, current_pitch = minescript.player_orientation()
@@ -266,10 +331,10 @@ def smooth_look_at(target_pos, duration=1.0, steps=60):
         # Base interpolation parameter (0.0 to 1.0)
         t = i / steps
         
-        # Apply smoothstep for ease-in-out
+        # Apply smoothstep for ease-in-out effect
         smooth_t = t * t * (3 - 2 * t)
         
-        # Direct linear interpolation
+        # Interpolate angles
         new_yaw = current_yaw + yaw_diff * smooth_t
         new_pitch = current_pitch + pitch_diff * smooth_t
         
@@ -285,74 +350,49 @@ def smooth_look_at(target_pos, duration=1.0, steps=60):
         if CONFIG['break_delay'] > 0:
             time.sleep(CONFIG['break_delay'])
         
-        # Press and hold attack
+        # Press attack and hold until block is broken
         minescript.player_press_attack(True)
-        time.sleep(CONFIG['break_hold_time'])
+        
+        # Keep holding until the block at target position is gone
+        block_x, block_y, block_z = block_pos
+        original_block = minescript.getblock(block_x, block_y, block_z)
+        
+        # Hold attack until block changes (is broken) or timeout
+        max_wait = 10.0  # Maximum 10 seconds
+        wait_time = 0.0
+        check_interval = 0.05
+        
+        while wait_time < max_wait:
+            time.sleep(check_interval)
+            wait_time += check_interval
+            
+            current_block = minescript.getblock(block_x, block_y, block_z)
+            if current_block != original_block:
+                # Block was broken
+                break
+        
         minescript.player_press_attack(False)
-    
-    return (target_yaw, target_pitch)
-
-def break_block_at_position(x, y, z):
-    """
-    Break a block at the specified position by simulating player attack.
-    
-    Args:
-        x, y, z: Block coordinates to break
-    
-    Returns:
-        True if block was successfully targeted and attack initiated
-    """
-    try:
-        # First, ensure the camera is looking at the block center
-        player_pos = minescript.player_position()
-        target_yaw, target_pitch = calculate_look_angles(
-            player_pos, 
-            (x + 0.5, y + 0.5, z + 0.5)
-        )
-        minescript.player_set_orientation(target_yaw, target_pitch)
-        
-        # Small delay to ensure orientation is set
-        time.sleep(0.05)
-        
-        # Verify we're looking at the correct block
-        targeted = minescript.player_get_targeted_block(max_distance=6)
-        if targeted and targeted.position == (x, y, z):
-            # Press and hold attack button
-            minescript.player_press_attack(True)
-            time.sleep(CONFIG['break_hold_time'])  # Hold to initiate breaking
-            minescript.player_press_attack(False)
-            
-            minescript.echo(f"  ⛏ Breaking block at ({x}, {y}, {z})")
-            return True
-        else:
-            if targeted:
-                minescript.echo(f"  ✗ Targeted wrong block: {targeted.position} instead of ({x}, {y}, {z})")
-            else:
-                minescript.echo(f"  ✗ No block in crosshairs at ({x}, {y}, {z})")
-            return False
-            
-    except Exception as e:
-        minescript.echo(f"  ✗ Failed to break block: {e}")
-        return False
 
 def main():
     """Main function to find and look at all target blocks sequentially."""
-    minescript.echo("=== Smooth Block Camera ===")
+    minescript.echo("=== Smooth Auto Mining Script ===")
     minescript.echo(f"Target: {CONFIG['target_block']}")
     minescript.echo(f"Config: distance={CONFIG['search_distance']}m, " +
                    f"speed={CONFIG['rotation_duration']}s, " +
-                   f"cooldown={CONFIG['block_cooldown']}s, " +
-                   f"cluster_mode={CONFIG['use_cluster_mode']}, " +
+                   f"cooldown={CONFIG['block_cooldown']}s")
+    minescript.echo(f"Features: cluster_mode={CONFIG['use_cluster_mode']}, " +
                    f"break_blocks={CONFIG['break_blocks']}, " +
+                   f"smart_targeting={CONFIG['use_smart_targeting']}, " +
+                   f"auto_rescan={CONFIG['auto_rescan']}, " +
                    f"ignore_state={CONFIG['ignore_block_state']}")
     
     # Get key name for display
     key_names = {89: 'Y', 82: 'R', 71: 'G', 84: 'T'}
     rescan_key_name = key_names.get(CONFIG['rescan_key'], f"key {CONFIG['rescan_key']}")
-    minescript.echo(f"\nPress '{rescan_key_name}' to start scanning | Open any GUI to exit")
+    minescript.echo(f"\nPress '{rescan_key_name}' to start mining | Open any GUI to exit")
     
     total_blocks_processed = 0
-    processed_positions = set()  # Track blocks we've already looked at
+    session_blocks = 0  # Blocks in current session
     is_active = False  # Whether we're actively processing blocks
     
     # Setup event queue for key and screen events
@@ -374,9 +414,14 @@ def main():
                     if event.type == "key":
                         # Key down event (action == 1) and matches rescan key
                         if event.action == 1 and event.key == CONFIG['rescan_key']:
-                            minescript.echo(f"\n'{rescan_key_name}' pressed - Starting new scan session!")
-                            processed_positions.clear()  # Clear processed list
-                            is_active = True
+                            if is_active:
+                                minescript.echo(f"\n'{rescan_key_name}' pressed - Pausing mining!")
+                                minescript.echo(f"Session stats: {session_blocks} blocks mined")
+                                is_active = False
+                                session_blocks = 0
+                            else:
+                                minescript.echo(f"\n'{rescan_key_name}' pressed - Starting mining!")
+                                is_active = True
             except:
                 pass  # No events in queue
             
@@ -387,30 +432,36 @@ def main():
             
             player_pos = minescript.player_position()
             
-            # Scan for all target blocks
+            # Scan for all target blocks (fresh scan every time)
             blocks = find_all_blocks(
                 max_distance=CONFIG['search_distance'],
                 block_type=CONFIG['target_block'],
                 ignore_state=CONFIG['ignore_block_state']
             )
             
-            # Filter out already processed blocks
-            unprocessed_blocks = [b for b in blocks if b['position'] not in processed_positions]
-            
-            if not unprocessed_blocks:
-                minescript.echo(f"✓ No more unprocessed blocks found!")
-                minescript.echo(f"Total blocks processed in this session: {total_blocks_processed}")
-                minescript.echo(f"Press '{rescan_key_name}' to start new scan session or open GUI to exit")
-                is_active = False
-                total_blocks_processed = 0
-                time.sleep(0.1)
-                continue
+            if not blocks:
+                if CONFIG['auto_rescan']:
+                    # In auto-rescan mode, keep checking silently
+                    time.sleep(0.5)  # Wait a bit before rescanning
+                    continue
+                else:
+                    minescript.echo(f"✓ No blocks found in range!")
+                    minescript.echo(f"Total blocks mined this session: {session_blocks}")
+                    minescript.echo(f"Press '{rescan_key_name}' to stop/start or open GUI to exit")
+                    is_active = False
+                    session_blocks = 0
+                    time.sleep(0.1)
+                    continue
             
             # Sort blocks based on configuration
             if CONFIG['use_cluster_mode']:
-                sorted_blocks = sort_blocks_by_viewing_order(unprocessed_blocks, player_pos)
+                sorted_blocks = sort_blocks_by_viewing_order(
+                    blocks, 
+                    player_pos,
+                    CONFIG['use_smart_targeting']
+                )
             else:
-                sorted_blocks = sorted(unprocessed_blocks, key=lambda b: b['distance'])
+                sorted_blocks = sorted(blocks, key=lambda b: b['distance'])
             
             # Process only the first block in the sorted list
             block_info = sorted_blocks[0]
@@ -425,25 +476,38 @@ def main():
             distance = block_info['distance']
             full_type = block_info.get('full_type', CONFIG['target_block'])
             
-            total_remaining = len(unprocessed_blocks)
-            minescript.echo(f"[{total_remaining} remaining] Looking at {full_type} at ({x}, {y}, {z}) - {distance:.1f}m away")
+            # Calculate target point based on smart targeting setting
+            if CONFIG['use_smart_targeting']:
+                target_point = find_visible_block_point(player_pos, (x, y, z))
+                targeting_mode = "visible face"
+            else:
+                target_point = (x + 0.5, y + 0.5, z + 0.5)
+                targeting_mode = "center"
+            
+            total_available = len(blocks)
+            minescript.echo(f"[{total_available} available] Mining {full_type} at ({x}, {y}, {z}) [{targeting_mode}] - {distance:.1f}m")
             
             # Smooth look with configured duration and steps
-            smooth_look_at((x + 0.5, y + 0.5, z + 0.5), 
-                         duration=CONFIG['rotation_duration'], 
-                         steps=CONFIG['rotation_steps'])
+            smooth_look_at(
+                target_point,
+                (x, y, z),
+                duration=CONFIG['rotation_duration'], 
+                steps=CONFIG['rotation_steps']
+            )
             
-            # Mark this block as processed
-            processed_positions.add(block_info['position'])
+            # Increment counters
             total_blocks_processed += 1
+            session_blocks += 1
             
             # Pause before next scan/block
-            time.sleep(CONFIG['block_cooldown'])
+            if CONFIG['block_cooldown'] > 0:
+                time.sleep(CONFIG['block_cooldown'])
             
-            # Loop continues, will rescan automatically for next block
+            # With auto_rescan enabled, loop continues and rescans immediately
+            # This allows continuous mining as the player moves or new blocks appear
     
     finally:
-        minescript.echo(f"✓ Script ended. Total blocks processed: {total_blocks_processed}")
+        minescript.echo(f"✓ Script ended. Total blocks mined: {total_blocks_processed}")
 
 
 # Run the script
