@@ -28,10 +28,6 @@ CONFIG = {
     # Rotation speed: controls how fast camera rotates (passed to rotation.py)
     # Higher = faster rotation
     'rotation_speed': 1,
-
-    # Smoothness: deprecated, smoothness now controlled by interpolation function
-    # Kept for compatibility, no longer affects rotation
-    'rotation_steps': 90,
     
     # Cooldown in seconds before scanning for next block
     'block_cooldown': 0.1,
@@ -301,7 +297,7 @@ def sort_blocks_by_viewing_order(blocks, player_pos, use_smart_targeting):
     
     return sorted_blocks
 
-def smooth_look_at(target_pos, block_pos, speed=1.0, steps=60):
+def smooth_look_at(target_pos, block_pos, speed=1.0):
     """
     Smoothly rotate camera to look at target position using rotation.py functions.
 
@@ -309,7 +305,6 @@ def smooth_look_at(target_pos, block_pos, speed=1.0, steps=60):
         target_pos: (x, y, z) tuple of precise target point to look at
         block_pos: (x, y, z) tuple of block position (for breaking)
         speed: Rotation speed parameter (passed directly to rotation.py)
-        steps: Deprecated, kept for compatibility
     """
     # Use look_at from rotation.py with configured interpolation function
     look_at(target_pos[0], target_pos[1], target_pos[2], speed=speed, func=CONFIG['interpolation'])
@@ -456,12 +451,11 @@ def main():
             total_available = len(blocks)
             minescript.echo(f"[{total_available} available] Mining {full_type} at ({x}, {y}, {z}) [{targeting_mode}] - {distance:.1f}m")
             
-            # Smooth look with configured speed and steps
+            # Smooth look with configured speed
             smooth_look_at(
                 target_point,
                 (x, y, z),
-                speed=CONFIG['rotation_speed'],
-                steps=CONFIG['rotation_steps']
+                speed=CONFIG['rotation_speed']
             )
             
             # Increment counters
